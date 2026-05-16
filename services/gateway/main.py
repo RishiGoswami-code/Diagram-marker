@@ -29,6 +29,18 @@ def delivery_report(err, msg):
 async def evaluate_diagram(payload: dict):
     """
     Ingests diagram evaluation request and pushes to Kafka.
+
+    Expected payload:
+    {
+        "image_url": "https://...",
+        "question_id": "q123",
+        "submission_id": "uuid",  # Edexia submission ID for traceability
+        "step_num": 3,            # Rubric step number this diagram belongs to
+        "rubric": {
+            "max_marks": 5,
+            "relations": [{"label": "aorta", "region": "region_0"}, ...]
+        }
+    }
     """
     task_id = str(uuid.uuid4())
     
@@ -36,7 +48,9 @@ async def evaluate_diagram(payload: dict):
     redis_client.set(f"diagram_result:{task_id}", json.dumps({
         "task_id": task_id,
         "status": "PROCESSING",
-        "message": "Queued for GPU detection"
+        "message": "Queued for GPU detection",
+        "submission_id": payload.get("submission_id", ""),
+        "step_num": payload.get("step_num", 0),
     }), ex=86400) # 24h TTL
 
     # Publish to Kafka
@@ -44,6 +58,8 @@ async def evaluate_diagram(payload: dict):
         "task_id": task_id,
         "image_url": payload.get("image_url", ""),
         "question_id": payload.get("question_id", ""),
+        "submission_id": payload.get("submission_id", ""),
+        "step_num": payload.get("step_num", 0),
         "rubric": payload.get("rubric", {})
     }
     

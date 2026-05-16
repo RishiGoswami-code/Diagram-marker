@@ -7,6 +7,10 @@ from confluent_kafka import Consumer, Producer
 try:
     import numpy as np
     import networkx as nx
+    import requests
+    from io import BytesIO
+    from PIL import Image
+    import easyocr
     HAS_ML = True
 except ImportError:
     HAS_ML = False
@@ -23,10 +27,18 @@ consumer = Consumer({
 })
 producer = Producer({'bootstrap.servers': KAFKA_BROKER})
 
+if HAS_ML:
+    logger.info("Initializing EasyOCR reader...")
+    try:
+        ocr_reader = easyocr.Reader(['en'])
+    except Exception as e:
+        logger.warning(f"Failed to initialize EasyOCR: {e}")
+        HAS_ML = False
+
 def euclidean_distance(p1, p2):
     return np.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
 
-def build_scene_graph(crops):
+def build_scene_graph(crops, image_url=None):
     """
     Takes YOLO crops, uses Euclidean distance to map Labels -> Arrows -> Regions,
     and returns a NetworkX Directed Graph serialized as a JSON edge list.
@@ -34,6 +46,18 @@ def build_scene_graph(crops):
     if not HAS_ML:
         logger.warning("ML libraries missing. Using mock graph.")
         return {"nodes": crops, "edges": [{"source": "label_aorta", "target": "region_1", "relation": "points_to"}]}
+        
+    img = None
+    if image_url:
+        try:
+            if image_url.startswith('http'):
+                response = requests.get(image_url)
+                response.raise_for_status()
+                img = Image.open(BytesIO(response.content))
+            else:
+                img = Image.open(image_url)
+        except Exception as e:
+            logger.error(f"Failed to load image for OCR from {image_url}: {e}")
         
     labels = [c for c in crops if c.get("cls") == 2]
     arrows = [c for c in crops if c.get("cls") == 1]
@@ -43,7 +67,27 @@ def build_scene_graph(crops):
     
     # Add nodes
     for l in labels:
-        G.add_node(f"label_{l['text']}", type="label", text=l['text'], center=l['center'])
+        label_text = l.get('text', 'unknown')
+        if img and 'bbox' in l:
+            # Run OCR on the bounding box
+            x1, y1, x2, y2 = map(int, l['bbox'])
+            # Ensure valid bounds
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(img.width, x2), min(img.height, y2)
+            
+            if x2 > x1 and y2 > y1:
+                cropped = img.crop((x1, y1, x2, y2))
+                img_np = np.array(cropped)
+                ocr_result = ocr_reader.readtext(img_np)
+                if ocr_result:
+                    # Combine all detected text in the box
+                    label_text = " ".join([res[1] for res in ocr_result])
+        
+        # We replace spaces with underscores to form the ID, but keep original for metadata
+        safe_id = f"label_{label_text.replace(' ', '_').lower()}"
+        l['text'] = label_text
+        G.add_node(safe_id, type="label", text=label_text, center=l['center'])
+        
     for idx, r in enumerate(regions):
         G.add_node(f"region_{idx}", type="region", center=r['center'])
         
@@ -59,7 +103,8 @@ def build_scene_graph(crops):
             d = euclidean_distance(arr_center, l['center'])
             if d < min_ldist:
                 min_ldist = d
-                closest_label = f"label_{l['text']}"
+                safe_id = f"label_{l['text'].replace(' ', '_').lower()}"
+                closest_label = safe_id
                 
         # Find closest region
         closest_region = None
@@ -94,7 +139,8 @@ def main():
             logger.info(f"Building scene graph for task {task_id}")
 
             # ── Execute Spatial Math ──
-            graph_data = build_scene_graph(payload.get("diagram_crops"))
+            image_url = payload.get("image_url")
+            graph_data = build_scene_graph(payload.get("diagram_crops"), image_url)
             
             out_msg = {
                 "task_id": task_id,
