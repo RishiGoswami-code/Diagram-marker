@@ -3,7 +3,9 @@ import json
 import logging
 import time
 from confluent_kafka import Consumer, Producer
-
+import requests
+from io import BytesIO
+from PIL import Image
 try:
     from ultralytics import YOLO
     import torch
@@ -44,43 +46,47 @@ def run_yolo_inference(image_url):
         logger.warning("ML libraries missing. Using mock inference.")
         time.sleep(0.5)
         return [
-            {"cls": 2, "label": "aorta", "bbox": [10, 20, 50, 60], "conf": 0.95, "center": [30, 40]},
+            {"cls": 2, "label": "label", "text": "aorta", "bbox": [10, 20, 50, 60], "conf": 0.95, "center": [30, 40]},
             {"cls": 1, "label": "arrow", "bbox": [55, 40, 80, 45], "conf": 0.88, "center": [67, 42]},
             {"cls": 0, "label": "region", "bbox": [85, 20, 150, 80], "conf": 0.92, "center": [117, 50]}
         ]
 
     # Real Inference Logic
     logger.info("Running real YOLOv8 inference pass...")
-    # NOTE: Normally we would download the image_url here using requests/PIL.
-    # For this architecture implementation, we simulate the results block from `model(img)`
-    
-    # results = model(image_url)
-    # boxes = results[0].boxes
-    
-    # We serialize the Ultralytics Boxes object into our standard schema
-    # extracted = []
-    # for box in boxes:
-    #     xyxy = box.xyxy[0].tolist()
-    #     cls_id = int(box.cls[0].item())
-    #     conf = float(box.conf[0].item())
-    #     cx = (xyxy[0] + xyxy[2]) / 2
-    #     cy = (xyxy[1] + xyxy[3]) / 2
-    #     extracted.append({
-    #         "cls": cls_id, 
-    #         "label": model.names[cls_id],
-    #         "bbox": xyxy,
-    #         "conf": conf,
-    #         "center": [cx, cy]
-    #     })
-    # return extracted
+    try:
+        if image_url.startswith('http'):
+            response = requests.get(image_url)
+            response.raise_for_status()
+            img = Image.open(BytesIO(response.content))
+        else:
+            # Local file path for testing
+            img = Image.open(image_url)
+    except Exception as e:
+        logger.error(f"Failed to load image from {image_url}: {e}")
+        return []
 
-    # Simulating successful real inference for the pipeline completion
-    time.sleep(1.2)
-    return [
-        {"cls": 2, "label": "label", "text": "aorta", "bbox": [10, 20, 50, 60], "conf": 0.95, "center": [30, 40]},
-        {"cls": 1, "label": "arrow", "bbox": [55, 40, 80, 45], "conf": 0.88, "center": [67, 42]},
-        {"cls": 0, "label": "region", "bbox": [85, 20, 150, 80], "conf": 0.92, "center": [117, 50]}
-    ]
+    results = model(img)
+    boxes = results[0].boxes
+    
+    extracted = []
+    for box in boxes:
+        xyxy = box.xyxy[0].tolist()
+        cls_id = int(box.cls[0].item())
+        conf = float(box.conf[0].item())
+        cx = (xyxy[0] + xyxy[2]) / 2
+        cy = (xyxy[1] + xyxy[3]) / 2
+        
+        # Determine label text (usually 0=region, 1=arrow, 2=label)
+        cls_name = model.names.get(cls_id, str(cls_id)) if hasattr(model, 'names') else str(cls_id)
+        
+        extracted.append({
+            "cls": cls_id, 
+            "label": cls_name,
+            "bbox": xyxy,
+            "conf": conf,
+            "center": [cx, cy]
+        })
+    return extracted
 
 
 def main():
@@ -101,6 +107,7 @@ def main():
             
             out_msg = {
                 "task_id": task_id,
+                "image_url": payload.get("image_url"), # Pass URL forward for OCR
                 "diagram_crops": regions,
                 "rubric": payload.get("rubric")
             }

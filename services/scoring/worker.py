@@ -42,16 +42,22 @@ def score_graph_isomorphism(student_graph_data, rubric_schema):
     logger.info("Running NetworkX Graph Isomorphism evaluation...")
     student_graph = nx.node_link_graph(student_graph_data)
     
-    # ── MOCK RUBRIC GRAPH FOR DEMONSTRATION ──
-    # In production, we fetch the "Golden Graph" from Qdrant Vector DB
     rubric_graph = nx.DiGraph()
-    rubric_graph.add_node("label_aorta", type="label")
-    rubric_graph.add_node("region_0", type="region")
-    rubric_graph.add_node("label_left_ventricle", type="label")
-    rubric_graph.add_node("region_1", type="region")
     
-    rubric_graph.add_edge("label_aorta", "region_0", relation="points_to")
-    rubric_graph.add_edge("label_left_ventricle", "region_1", relation="points_to")
+    relations = rubric_schema.get("relations", [])
+    for rel in relations:
+        label_text = rel.get("label", "unknown")
+        region_id = rel.get("region", "region_0")
+        
+        safe_label_id = f"label_{label_text.replace(' ', '_').lower()}"
+        
+        # Add nodes if they don't exist
+        if not rubric_graph.has_node(safe_label_id):
+            rubric_graph.add_node(safe_label_id, type="label", text=label_text)
+        if not rubric_graph.has_node(region_id):
+            rubric_graph.add_node(region_id, type="region")
+            
+        rubric_graph.add_edge(safe_label_id, region_id, relation="points_to")
     
     # Run exact matching on edge relationships ignoring coordinate differences
     def node_match(n1, n2):
@@ -71,25 +77,45 @@ def score_graph_isomorphism(student_graph_data, rubric_schema):
         # Does the student graph contain an edge from an equivalent label to an equivalent region?
         found = False
         for s_u, s_v, data in student_edges:
-            # We assume label names matched during OCR/fuzzy matching prior to graph building
+            # Check if student has a matching label pointing to any region
+            # We use fuzzy matching or exact matching based on label text
+            # For this version, we require the node IDs (which encode the label text) to match
             if s_u == r_u: 
                 found = True
                 matched_edges += 1
                 break
         if not found:
-            missing_edges.append(f"Missing pointer from {r_u} to its target region.")
+            missing_edges.append(f"Missing pointer from label '{r_u}' to a region.")
 
     max_marks = rubric_schema.get("max_marks", 5)
     score_ratio = matched_edges / max(len(rubric_edges), 1)
     predicted_marks = round(score_ratio * max_marks)
     
+    # Extract per-label scoring for the Label Validation Pipeline
+    label_scores = []
+    for r_u, r_v in rubric_edges:
+        label_text = rubric_graph.nodes[r_u].get("text", r_u)
+        matched = any(s_u == r_u for s_u, s_v, _ in student_edges)
+        # Try to find detected text from student graph
+        detected_text = ""
+        if matched and student_graph.has_node(r_u):
+            detected_text = student_graph.nodes[r_u].get("text", r_u)
+        label_scores.append({
+            "expected": label_text,
+            "text": detected_text if matched else "",
+            "matched": matched,
+            "target_region": r_v,
+        })
+
     return {
         "diagram_detected": True,
         "predicted_marks": predicted_marks,
         "max_marks": max_marks,
-        "confidence": score_ratio, # Lower score ratio generally means lower AI confidence in messy diagrams
+        "confidence": score_ratio,
         "rubric_breakdown": {"edges_matched": matched_edges, "edges_required": len(rubric_edges)},
-        "missing_components": missing_edges
+        "missing_components": missing_edges,
+        "label_scores": label_scores,
+        "scene_graph": student_graph_data,
     }
 
 def main():
