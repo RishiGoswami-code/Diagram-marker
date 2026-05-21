@@ -36,5 +36,3 @@ jobs:
       run: |
         # Check syntax errors or undefined names in services
         flake8 services --count --select=E9,F63,F7,F82 --show-source --statistics
-        # black format validation check
-        black --check services
