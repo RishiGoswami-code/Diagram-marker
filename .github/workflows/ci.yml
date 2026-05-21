@@ -1,0 +1,40 @@
+name: Edexia AIOS Diagram-Marker CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main", "feat/*", "bug/*" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-lint:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code Repository
+      uses: actions/checkout@v3
+
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.10"
+
+    - name: Install System Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libgl1-mesa-glx libglib2.0-0 build-essential
+
+    - name: Install PyTorch and Ultralytics
+      run: |
+        python -m pip install --upgrade pip
+        # Install CPU-based PyTorch first to reduce runner resources
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+        pip install -r requirements.txt
+        pip install flake8 black
+
+    - name: Code Style & Lint Check
+      run: |
+        # Check syntax errors or undefined names in services
+        flake8 services --count --select=E9,F63,F7,F82 --show-source --statistics
+        # black format validation check
+        black --check services
